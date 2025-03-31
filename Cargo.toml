@@ -1,0 +1,22 @@
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Theyahya/port.pub"
+authors = ["Yahya Sayad Arbabi <yahya.arbabi@gmail.com>"]
+description = "Publish your local app on the public internet"
+homepage = "https://port.pub"
+publish = false
+
+[workspace]
+resolver = "2"
+members = [
+    "portpub/cli",
+    "portpub/server",
+    "portpub/shared"
+]
+
+[workspace.dependencies]
+tokio = { version = "1.17.0", features = ["full"] }
+

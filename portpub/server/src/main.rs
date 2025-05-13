@@ -12,7 +12,7 @@ use tokio_util::codec::Framed;
 use tracing::{Instrument, Level, error, info, span, warn};
 use uuid::Uuid;
 
-use shared;
+use portpub_shared;
 
 fn extract_subdomain(host: &str) -> Result<String> {
     let host = host.to_lowercase().replacen("host:", "", 1);
@@ -102,12 +102,12 @@ impl Server {
 
                 if let Some(the_cli_stream) = subdomain_conns.get(&subdomain) {
                     let mut cli_locked = the_cli_stream.lock().await;
-                    let codec = shared::new_codec();
+                    let codec = portpub_shared::new_codec();
                     let mut framed = Framed::new(&mut *cli_locked, codec);
 
                     let id = Uuid::new_v4();
                     info!("new connection({})", id.to_string());
-                    let msg = shared::ServerMessage::Connection(id);
+                    let msg = portpub_shared::ServerMessage::Connection(id);
                     let msg_str = match serde_json::to_string(&msg) {
                         Ok(msg) => msg,
                         Err(e) => {
@@ -136,7 +136,7 @@ impl Server {
             }
         }
 
-        let codec = shared::new_codec();
+        let codec = portpub_shared::new_codec();
         let mut framed = Framed::new(&mut cli_stream, codec);
 
         let Some(cli_msg) = framed.next().await else {
@@ -151,7 +151,7 @@ impl Server {
                 return;
             }
         };
-        let cli_msg = match serde_json::from_slice::<shared::ClientMessage>(&cli_msg) {
+        let cli_msg = match serde_json::from_slice::<portpub_shared::ClientMessage>(&cli_msg) {
             Ok(msg) => msg,
             Err(e) => {
                 error!("failed parsing cli message: {}, message: {:?}", e, cli_msg);
@@ -160,9 +160,9 @@ impl Server {
         };
 
         match cli_msg {
-            shared::ClientMessage::Hello => {
+            portpub_shared::ClientMessage::Hello => {
                 let sub_domain = Uuid::new_v4().to_string();
-                let msg = shared::ServerMessage::SubDomain(sub_domain.clone());
+                let msg = portpub_shared::ServerMessage::SubDomain(sub_domain.clone());
                 let msg_str = match serde_json::to_string(&msg) {
                     Ok(msg) => msg,
                     Err(e) => {
@@ -184,7 +184,7 @@ impl Server {
                 let cli_stream = Arc::new(Mutex::new(cli_stream));
                 subdomain_conns.insert(sub_domain, cli_stream);
             }
-            shared::ClientMessage::Accept(id) => {
+            portpub_shared::ClientMessage::Accept(id) => {
                 info!("accepting: {}", id);
                 if let Some((_, stream)) = cli_conns.remove(&id.to_string()) {
                     let mut cli_locked = stream.lock().await;

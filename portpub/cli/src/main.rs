@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use futures::{SinkExt, StreamExt};
-use shared;
+use portpub_shared;
 use tokio::io;
 use tokio::net::TcpStream;
 use tokio_util::codec::Framed;
@@ -43,10 +43,10 @@ async fn main() {
         .await
         .expect("failed to connect to port.pub. please try again!");
 
-    let codec = shared::new_codec();
+    let codec = portpub_shared::new_codec();
     let mut framed = Framed::new(remote_socket, codec);
 
-    let hello_msg = match serde_json::to_string(&shared::ClientMessage::Hello) {
+    let hello_msg = match serde_json::to_string(&portpub_shared::ClientMessage::Hello) {
         Ok(msg) => msg,
         Err(e) => {
             eprintln!("failed to create marshal hello message: {}", e);
@@ -68,7 +68,7 @@ async fn main() {
             }
         };
 
-        let msg = match serde_json::from_slice::<shared::ServerMessage>(&msg) {
+        let msg = match serde_json::from_slice::<portpub_shared::ServerMessage>(&msg) {
             Ok(msg) => msg,
             Err(e) => {
                 eprintln!("unknown message from server: {e}");
@@ -77,7 +77,7 @@ async fn main() {
         };
 
         match msg {
-            shared::ServerMessage::Connection(id) => {
+            portpub_shared::ServerMessage::Connection(id) => {
                 tokio::spawn(async move {
                     let mut remote_socket = match TcpStream::connect(SERVER).await {
                         Ok(r) => r,
@@ -87,10 +87,10 @@ async fn main() {
                         }
                     };
 
-                    let codec = shared::new_codec();
+                    let codec = portpub_shared::new_codec();
                     let mut framed = Framed::new(&mut remote_socket, codec);
 
-                    let accept = shared::ClientMessage::Accept(id);
+                    let accept = portpub_shared::ClientMessage::Accept(id);
                     let accept_str = match serde_json::to_string(&accept) {
                         Ok(s) => s,
                         Err(e) => {
@@ -132,7 +132,7 @@ async fn main() {
                     };
                 });
             }
-            shared::ServerMessage::SubDomain(sub_domain) => {
+            portpub_shared::ServerMessage::SubDomain(sub_domain) => {
                 println!("port published at: {sub_domain}.port.pub");
             }
         };

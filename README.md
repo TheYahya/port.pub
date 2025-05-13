@@ -3,7 +3,7 @@ Share your local http server with public internet.
 
 ### How to use
 1. [Install rust](https://www.rust-lang.org/tools/install)
-2. Install `portpub` CLI: `cargo install --git https://github.com/TheYahya/port.pub portpub`
+2. Install `portpub` CLI: `cargo install portpub`
 3. Run: `portpub http --port {PORT}` (replate `{PORT}` with your local http server port).
 
    e.g. `portpub -- http --port 8081`

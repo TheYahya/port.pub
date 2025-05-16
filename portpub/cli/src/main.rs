@@ -1,11 +1,405 @@
+use chrono::Local;
 use clap::{Parser, Subcommand};
-use futures::{SinkExt, StreamExt};
+use color_eyre::Result;
+use crossterm::event::{Event, EventStream, KeyCode};
+use futures::SinkExt;
+use httparse;
 use portpub_shared;
-use tokio::io;
+use ratatui::DefaultTerminal;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Direction;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Style, Stylize};
+use ratatui::text::Line;
+use ratatui::widgets::{
+    Block, Cell, HighlightSpacing, Row, StatefulWidget, Table, TableState, Widget,
+};
+use ratatui::{Frame, style::Modifier, text::Span, widgets::Paragraph};
+use std::pin::Pin;
+use std::sync::{Arc, RwLock};
+use std::task::{Context, Poll};
+use std::time::Duration;
+use tokio::io::{AsyncRead, ReadBuf};
 use tokio::net::TcpStream;
+use tokio_stream::StreamExt;
 use tokio_util::codec::Framed;
 
 const SERVER: &str = "port.pub:80";
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    let port = match cli.command {
+        Some(Commands::Http { port }) => {
+            println!("port: {}", port);
+            port
+        }
+        None => {
+            println!("invalid command, please run: portpub --help");
+            return Ok(());
+        }
+    };
+
+    color_eyre::install()?;
+    let terminal = ratatui::init();
+    let app_result = App::default().run(terminal, port).await;
+    ratatui::restore();
+    app_result
+}
+
+#[derive(Debug, Default)]
+struct App {
+    should_quit: bool,
+    requests: Arc<RequestListWidget>,
+}
+
+impl App {
+    const FRAMES_PER_SECOND: f32 = 60.0;
+
+    pub async fn run(mut self, mut terminal: DefaultTerminal, port: u16) -> Result<()> {
+        self.requests.run(port);
+
+        let period = Duration::from_secs_f32(1.0 / Self::FRAMES_PER_SECOND);
+        let mut interval = tokio::time::interval(period);
+        let mut events = EventStream::new();
+
+        while !self.should_quit {
+            tokio::select! {
+                _ = interval.tick() => { terminal.draw(|frame| self.render(frame))?; },
+                Some(Ok(event)) = events.next() => self.handle_event(&event),
+            }
+        }
+        Ok(())
+    }
+
+    fn render(&self, frame: &mut Frame) {
+        let vertical = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]);
+        let [title_area, body_area] = vertical.areas(frame.area());
+
+        let title_lines = vec![
+            Line::from(Span::styled(
+                "port.pub",
+                Style::default().add_modifier(Modifier::BOLD),
+            ))
+            .centered(),
+        ];
+        let title_paragraph = Paragraph::new(title_lines);
+
+        frame.render_widget(title_paragraph, title_area);
+
+        frame.render_widget(&*self.requests, body_area);
+    }
+
+    fn handle_event(&mut self, event: &Event) {
+        if let Some(key) = event.as_key_press_event() {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+                KeyCode::Char('j') | KeyCode::Down => self.requests.scroll_down(),
+                KeyCode::Char('k') | KeyCode::Up => self.requests.scroll_up(),
+                _ => {}
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct RequestListWidget {
+    state: Arc<RwLock<RequestListState>>,
+}
+
+#[derive(Debug, Default)]
+struct RequestListState {
+    requests: Vec<Request>,
+    loading_state: LoadingState,
+    top_status: String,
+    table_state: TableState,
+}
+
+#[derive(Debug, Clone)]
+struct Request {
+    time: String,
+    path: String,
+    method: String,
+    status: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum LoadingState {
+    #[default]
+    Idle,
+    Handling,
+    Handled,
+}
+
+impl RequestListWidget {
+    fn run(self: &Arc<Self>, port: u16) {
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            this.run_portpub(port).await;
+        });
+    }
+
+    async fn run_portpub(self: Arc<Self>, port: u16) {
+        let remote_socket = TcpStream::connect(SERVER)
+            .await
+            .expect("failed to connect to port.pub");
+
+        let codec = portpub_shared::new_codec();
+        let mut framed = Framed::new(remote_socket, codec);
+
+        let hello_msg = match serde_json::to_string(&portpub_shared::ClientMessage::Hello) {
+            Ok(msg) => msg,
+            Err(e) => {
+                self.set_top_state(format!("failed to marshal hello message: {}", e));
+                return;
+            }
+        };
+
+        if let Err(e) = framed.send(hello_msg).await {
+            self.set_top_state(format!("failed to send hello message: {}", e));
+            return;
+        }
+
+        while let Some(msg) = framed.next().await {
+            let msg = match msg {
+                Ok(msg) => msg,
+                Err(e) => {
+                    self.set_top_state(format!("failed to recieve new messages: {}", e));
+                    return;
+                }
+            };
+
+            let msg = match serde_json::from_slice::<portpub_shared::ServerMessage>(&msg) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    self.set_top_state(format!("unknown message from server: {e}"));
+                    continue;
+                }
+            };
+
+            match msg {
+                portpub_shared::ServerMessage::Connection(id) => {
+                    let mut state = self.state.write().unwrap();
+                    state.loading_state = LoadingState::Handling;
+
+                    let this = Arc::clone(&self);
+
+                    tokio::spawn(async move {
+                        let mut remote_socket = match TcpStream::connect(SERVER).await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                this.set_top_state(format!(
+                                    "failed to connecto to server ({SERVER}): {e}"
+                                ));
+                                return;
+                            }
+                        };
+
+                        let codec = portpub_shared::new_codec();
+                        let mut framed = Framed::new(&mut remote_socket, codec);
+
+                        let accept = portpub_shared::ClientMessage::Accept(id);
+                        let accept_str = match serde_json::to_string(&accept) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                this.set_top_state(format!(
+                                    "failed to marshal accept message: {e}"
+                                ));
+                                return;
+                            }
+                        };
+
+                        if let Err(e) = framed.send(accept_str).await {
+                            this.set_top_state(format!("failed to send accept message: {}", e));
+                            return;
+                        }
+
+                        let local_socket = match TcpStream::connect(("localhost", port)).await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                this.set_top_state(format!(
+                                    "failed to connecto to local on port {port}: {e}"
+                                ));
+                                return;
+                            }
+                        };
+
+                        let mut buf = [0; 4096];
+                        let n = remote_socket.peek(&mut buf).await.unwrap();
+
+                        let mut headers = [httparse::EMPTY_HEADER; 32];
+                        let mut req = httparse::Request::new(&mut headers);
+                        let _ = req.parse(&buf[..n]).unwrap();
+
+                        let mut path = String::new();
+                        let mut method = String::new();
+                        if let Some(p) = req.path {
+                            path = p.to_string();
+                        }
+                        if let Some(m) = req.method {
+                            method = m.to_string();
+                        }
+
+                        let (mut s1_read, mut s1_write) = remote_socket.into_split();
+                        let (s2_read, mut s2_write) = local_socket.into_split();
+
+                        let client_to_server = tokio::spawn(async move {
+                            tokio::io::copy(&mut s1_read, &mut s2_write).await
+                        });
+
+                        let server_to_client = tokio::spawn(async move {
+                            let mut s2_read = PeekReader {
+                                inner: s2_read,
+                                status_code: None,
+                            };
+                            let res = tokio::io::copy(&mut s2_read, &mut s1_write).await;
+                            let code = s2_read.status_code.map(|c| c.to_string());
+                            (res, code)
+                        });
+
+                        let (res1, res2) = tokio::join!(client_to_server, server_to_client);
+
+                        let status = match &res2 {
+                            Ok((_, Some(code))) => code.clone(),
+                            _ => String::new(),
+                        };
+
+                        let now = Local::now();
+                        let now_string = now.format("%Y-%m-%d %H:%M:%S").to_string();
+                        match (res1, res2) {
+                            (Ok(Ok(_)), Ok((Ok(_), _))) => {
+                                this.add_request(Request {
+                                    time: now_string,
+                                    method,
+                                    path,
+                                    status,
+                                });
+                            }
+                            _ => {
+                                this.add_request(Request {
+                                    time: now_string,
+                                    method,
+                                    path,
+                                    status: "Error".to_string(),
+                                });
+                            }
+                        }
+                    });
+                }
+                portpub_shared::ServerMessage::SubDomain(sub_domain) => {
+                    self.set_top_state(format!("Published at: {sub_domain}.port.pub"));
+                }
+            };
+        }
+    }
+
+    fn add_request(&self, request: Request) {
+        let mut state = self.state.write().unwrap();
+        state.loading_state = LoadingState::Handled;
+        state.requests.extend(vec![request]);
+    }
+
+    fn set_top_state(&self, status: String) {
+        self.state.write().unwrap().top_status = status;
+    }
+
+    fn scroll_down(&self) {
+        self.state.write().unwrap().table_state.scroll_down_by(1);
+    }
+
+    fn scroll_up(&self) {
+        self.state.write().unwrap().table_state.scroll_up_by(1);
+    }
+}
+
+struct PeekReader<R> {
+    inner: R,
+    pub status_code: Option<u16>,
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for PeekReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let pre_filled = buf.filled().len();
+
+        let result = Pin::new(&mut self.inner).poll_read(cx, buf);
+
+        if let Poll::Ready(Ok(())) = &result {
+            let new_bytes = &buf.filled()[pre_filled..];
+
+            let mut headers = [httparse::EMPTY_HEADER; 32];
+            let mut res = httparse::Response::new(&mut headers);
+            match res.parse(new_bytes) {
+                Ok(httparse::Status::Complete(_)) => {
+                    if let Some(code) = res.code {
+                        self.status_code = Some(code);
+                    }
+                }
+                Ok(httparse::Status::Partial) => {}
+                Err(_) => {}
+            }
+        }
+
+        result
+    }
+}
+
+impl Widget for &RequestListWidget {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let mut state = self.state.write().unwrap();
+        let top_status = Span::raw(state.top_status.to_string());
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
+
+        let top_line = Paragraph::new(Line::from(top_status));
+
+        top_line.render(chunks[0], buf);
+
+        let loading_state = Line::from(format!("{:?}", state.loading_state)).right_aligned();
+        let block = Block::bordered()
+            .title("Requests")
+            .title(loading_state)
+            .title_bottom("j/k to scroll, q to quit");
+
+        let rows = state.requests.iter().map(|request| {
+            Row::new(vec![
+                Cell::from(request.time.clone()).style(Style::default().fg(Color::Yellow)),
+                // TODO: change color conditionally
+                Cell::from(request.status.to_string()).style(Style::default().fg(Color::White)),
+                Cell::from(request.method.to_string()).style(Style::default().fg(Color::White)),
+                Cell::from(request.path.clone()).style(Style::default().fg(Color::Blue)),
+            ])
+        });
+
+        let widths = [
+            Constraint::Length(20),
+            Constraint::Max(4),
+            Constraint::Max(5),
+            Constraint::Fill(1),
+        ];
+        let table = Table::new(rows, widths)
+            .block(block)
+            .highlight_spacing(HighlightSpacing::Always)
+            .highlight_symbol(">>")
+            .row_highlight_style(Style::new().on_blue());
+
+        StatefulWidget::render(table, chunks[1], buf, &mut state.table_state);
+    }
+}
+
+impl From<&Request> for Row<'_> {
+    fn from(r: &Request) -> Self {
+        let r = r.clone();
+        Row::new(vec![r.time, r.status, r.method, r.path])
+    }
+}
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -22,119 +416,4 @@ enum Commands {
         #[clap(short, long)]
         port: u16,
     },
-}
-
-#[tokio::main]
-async fn main() {
-    let cli = Cli::parse();
-
-    let port = match cli.command {
-        Some(Commands::Http { port }) => {
-            println!("port: {}", port);
-            port
-        }
-        None => {
-            println!("invalid command, please run: portpub --help");
-            return;
-        }
-    };
-
-    let remote_socket = TcpStream::connect(SERVER)
-        .await
-        .expect("failed to connect to port.pub. please try again!");
-
-    let codec = portpub_shared::new_codec();
-    let mut framed = Framed::new(remote_socket, codec);
-
-    let hello_msg = match serde_json::to_string(&portpub_shared::ClientMessage::Hello) {
-        Ok(msg) => msg,
-        Err(e) => {
-            eprintln!("failed to create marshal hello message: {}", e);
-            return;
-        }
-    };
-
-    if let Err(e) = framed.send(hello_msg).await {
-        eprintln!("failed to send hello message to port.pub: {}", e);
-        return;
-    }
-
-    while let Some(msg) = framed.next().await {
-        let msg = match msg {
-            Ok(msg) => msg,
-            Err(e) => {
-                eprintln!("failed to recieve new messages: {}", e);
-                return;
-            }
-        };
-
-        let msg = match serde_json::from_slice::<portpub_shared::ServerMessage>(&msg) {
-            Ok(msg) => msg,
-            Err(e) => {
-                eprintln!("unknown message from server: {e}");
-                continue;
-            }
-        };
-
-        match msg {
-            portpub_shared::ServerMessage::Connection(id) => {
-                tokio::spawn(async move {
-                    let mut remote_socket = match TcpStream::connect(SERVER).await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            eprintln!("failed to connecto to server ({SERVER}): {e}");
-                            return;
-                        }
-                    };
-
-                    let codec = portpub_shared::new_codec();
-                    let mut framed = Framed::new(&mut remote_socket, codec);
-
-                    let accept = portpub_shared::ClientMessage::Accept(id);
-                    let accept_str = match serde_json::to_string(&accept) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            eprintln!("failed to marshal accept message: {e}");
-                            return;
-                        }
-                    };
-
-                    if let Err(e) = framed.send(accept_str).await {
-                        eprintln!("failed to send accept message: {}", e);
-                        return;
-                    }
-
-                    let mut local_socket = match TcpStream::connect(("localhost", port)).await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            eprintln!("failed to connecto to local on port {port}: {e}");
-                            return;
-                        }
-                    };
-
-                    let (mut s1_read, mut s1_write) = remote_socket.split();
-                    let (mut s2_read, mut s2_write) = local_socket.split();
-
-                    match tokio::select! {
-                        res = io::copy(&mut s1_read, &mut s2_write) => {
-                          res
-                        },
-                        res = io::copy(&mut s2_read, &mut s1_write) => {
-                            res
-                        },
-                    } {
-                        Ok(_) => {
-                            println!("request {id} proccesed");
-                        }
-                        Err(e) => {
-                            eprintln!("failed to copy streams: {e}");
-                        }
-                    };
-                });
-            }
-            portpub_shared::ServerMessage::SubDomain(sub_domain) => {
-                println!("port published at: {sub_domain}.port.pub");
-            }
-        };
-    }
 }

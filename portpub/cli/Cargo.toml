@@ -24,3 +24,13 @@ tokio-util = { version = "0.7.1", features = ["full"] }
 futures = "0.3"
 bytes = "1"
 clap = { version = "4.5.34", features = ["derive"] }
+ratatui = "0.29.0"
+crossterm = { version = "0.29.0", features = ["event-stream"] }
+anyhow = "1.0"
+color-eyre = "0.6.3"
+octocrab = "0.44.0"
+tokio-stream = "0.1.17"
+httparse = "1.10.1"
+chrono = "0.4"
+
+

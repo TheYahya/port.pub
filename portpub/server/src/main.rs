@@ -2,6 +2,8 @@ use anyhow::{Context, Result, anyhow};
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use human_bytes::human_bytes;
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -13,6 +15,27 @@ use tracing::{Instrument, Level, error, info, span, warn};
 use uuid::Uuid;
 
 use portpub_shared;
+
+const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789-";
+fn random_string(length: u8) -> Result<String, anyhow::Error> {
+    if length == 0 {
+        return Err(anyhow!("length must be greater than 0"));
+    }
+
+    let mut rng = thread_rng();
+
+    let rand_string: String = (0..length)
+        .map(|_| {
+            CHARSET
+                .choose(&mut rng)
+                .copied()
+                .map(|c| c as char)
+                .ok_or(anyhow!("failed to generate random character"))
+        })
+        .collect::<Result<String, _>>()?;
+
+    Ok(rand_string)
+}
 
 fn extract_subdomain(host: &str) -> Result<String> {
     let host = host.to_lowercase().replacen("host:", "", 1);
@@ -161,7 +184,16 @@ impl Server {
 
         match cli_msg {
             portpub_shared::ClientMessage::Hello => {
-                let sub_domain = Uuid::new_v4().to_string();
+                let mut sub_domain = match random_string(5) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!(
+                            "failed to generate random subdomain, fallback to uuid: {}",
+                            e
+                        );
+                        Uuid::new_v4().to_string()
+                    }
+                };
                 let msg = portpub_shared::ServerMessage::SubDomain(sub_domain.clone());
                 let msg_str = match serde_json::to_string(&msg) {
                     Ok(msg) => msg,
@@ -182,6 +214,11 @@ impl Server {
                 }
 
                 let cli_stream = Arc::new(Mutex::new(cli_stream));
+
+                // check if subdomain already exists
+                if subdomain_conns.get(&sub_domain).is_some() {
+                    sub_domain = Uuid::new_v4().to_string();
+                }
                 subdomain_conns.insert(sub_domain, cli_stream);
             }
             portpub_shared::ClientMessage::Accept(id) => {

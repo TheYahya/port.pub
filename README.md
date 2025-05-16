@@ -1,6 +1,8 @@
 # port.pub
 Share your local http server with public internet.
 
+<img alt="port.pub demo" src="https://github.com/theyahya/port.pub/blob/main/demo/demo.gif" width="600" />
+
 ### How to use
 1. [Install rust](https://www.rust-lang.org/tools/install)
 2. Install `portpub` CLI: `cargo install portpub`

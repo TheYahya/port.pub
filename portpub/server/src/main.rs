@@ -8,8 +8,10 @@ use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io;
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+use tokio::time::{Duration, sleep};
 use tokio_util::codec::Framed;
 use tracing::{Instrument, Level, error, info, span, warn};
 use uuid::Uuid;
@@ -92,6 +94,39 @@ impl Server {
                 .instrument(span),
             );
         }
+    }
+
+    async fn remove_stale_connections(&self) -> Result<()> {
+        let subdomain_conns = Arc::clone(&self.subdomain_conns);
+        tokio::spawn(async move {
+            loop {
+                info!("checking for stale connections");
+
+                for entry in subdomain_conns.iter() {
+                    let msg = portpub_shared::ServerMessage::Heartbeat;
+                    let msg_str = match serde_json::to_string(&msg) {
+                        Ok(msg) => msg,
+                        Err(e) => {
+                            error!("failed to marshal heartbeat message: {}", e);
+                            return;
+                        }
+                    };
+
+                    let mut cli_locked = entry.value().lock().await;
+                    if cli_locked.write_all(msg_str.as_bytes()).await.is_err() {
+                        info!(
+                            "failed to send heartbeat message, removing connection {}",
+                            entry.key()
+                        );
+                        subdomain_conns.remove(entry.key());
+                    }
+                }
+
+                sleep(Duration::from_secs(60 * 10)).await;
+            }
+        });
+
+        Ok(())
     }
 
     async fn handle_connection(&self, mut cli_stream: TcpStream) {
@@ -219,7 +254,8 @@ impl Server {
                 if subdomain_conns.get(&sub_domain).is_some() {
                     sub_domain = Uuid::new_v4().to_string();
                 }
-                subdomain_conns.insert(sub_domain, cli_stream);
+                subdomain_conns.insert(sub_domain.clone(), cli_stream);
+                info!("new subdomain: {}", sub_domain);
             }
             portpub_shared::ClientMessage::Accept(id) => {
                 info!("accepting: {}", id);
@@ -256,7 +292,9 @@ async fn main() -> Result<()> {
         .parse()
         .context("PORT must be a valid integer")?;
 
-    Server::new(port).listen().await?;
+    let server = Server::new(port);
+    server.remove_stale_connections().await?;
+    server.listen().await?;
 
     Ok(())
 }

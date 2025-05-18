@@ -12,6 +12,7 @@ pub enum ClientMessage {
 pub enum ServerMessage {
     SubDomain(String),
     Connection(Uuid),
+    Heartbeat,
 }
 
 pub fn new_codec() -> AnyDelimiterCodec {

@@ -179,6 +179,7 @@ impl RequestListWidget {
             };
 
             match msg {
+                portpub_shared::ServerMessage::Heartbeat => {}
                 portpub_shared::ServerMessage::Connection(id) => {
                     let mut state = self.state.write().unwrap();
                     state.loading_state = LoadingState::Handling;

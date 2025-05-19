@@ -11,7 +11,7 @@ edition.workspace = true
 publish = true
 
 [dependencies]
-portpub-shared = { path = "../shared", version = "0.3.0" }
+portpub-shared = { path = "../shared", version = "0.3.1" }
 tokio.workspace = true
 uuid = {version = "1.2.0", features = [ "serde", "v4" ] }
 serde = {version = "1", features =["derive"]}

@@ -24,7 +24,7 @@ use tokio::net::TcpStream;
 use tokio_stream::StreamExt;
 use tokio_util::codec::Framed;
 
-const SERVER: &str = "port.pub:80";
+const SERVER: &str = "port.pub:4321";
 
 #[tokio::main]
 async fn main() -> Result<()> {

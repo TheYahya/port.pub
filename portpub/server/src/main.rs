@@ -49,47 +49,83 @@ fn extract_subdomain(host: &str) -> Result<String> {
     }
 }
 
+#[derive(Debug, Clone)]
 struct Server {
-    port: u16,
+    cli_tcp_port: u16,
+    http_port: u16,
 
     cli_conns: Arc<DashMap<String, Arc<Mutex<TcpStream>>>>,
     subdomain_conns: Arc<DashMap<String, Arc<Mutex<TcpStream>>>>,
 }
 
 impl Server {
-    pub fn new(port: u16) -> Self {
+    pub fn new(cli_tcp_port: u16, http_port: u16) -> Self {
         Server {
-            port,
+            cli_tcp_port,
+            http_port,
             cli_conns: Arc::new(DashMap::default()),
             subdomain_conns: Arc::new(DashMap::default()),
         }
     }
 
-    async fn listen(self) -> Result<()> {
-        let addr = SocketAddr::from(([0, 0, 0, 0], self.port));
-        let listener = TcpListener::bind(addr)
-            .await
-            .context(format!("failed to run server on port {}", self.port))?;
+    async fn listen_cli(self) -> Result<()> {
+        let addr = SocketAddr::from(([0, 0, 0, 0], self.cli_tcp_port));
+        let listener = TcpListener::bind(addr).await.context(format!(
+            "failed to run cli server on port {}",
+            self.cli_tcp_port
+        ))?;
 
-        info!(port = &self.port, "server start");
+        info!(port = &self.cli_tcp_port, "cli server start");
 
         let this = Arc::new(self);
         loop {
             let (stream, _) = match listener.accept().await {
                 Ok(stream) => stream,
                 Err(e) => {
-                    error!("failed to accept connection: {}", e);
+                    error!("cli server failed to accept connection: {}", e);
                     continue;
                 }
             };
 
             let req_id = Uuid::new_v4();
-            let span = span!(Level::INFO, "handle_connection", %req_id);
+            let span = span!(Level::INFO, "handle_cli_connection", %req_id);
 
             let this = Arc::clone(&this);
             tokio::spawn(
                 async move {
-                    this.handle_connection(stream).await;
+                    this.handle_cli_connection(stream).await;
+                }
+                .instrument(span),
+            );
+        }
+    }
+
+    async fn listen_http(self) -> Result<()> {
+        let addr = SocketAddr::from(([0, 0, 0, 0], self.http_port));
+        let listener = TcpListener::bind(addr).await.context(format!(
+            "failed to run http server on port {}",
+            self.http_port
+        ))?;
+
+        info!(port = &self.http_port, "http server start");
+
+        let this = Arc::new(self);
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    error!("http server failed to accept connection: {}", e);
+                    continue;
+                }
+            };
+
+            let req_id = Uuid::new_v4();
+            let span = span!(Level::INFO, "handle_http_connection", %req_id);
+
+            let this = Arc::clone(&this);
+            tokio::spawn(
+                async move {
+                    this.handle_http_connection(stream).await;
                 }
                 .instrument(span),
             );
@@ -128,8 +164,7 @@ impl Server {
 
         Ok(())
     }
-
-    async fn handle_connection(&self, mut cli_stream: TcpStream) {
+    async fn handle_http_connection(&self, cli_stream: TcpStream) {
         let cli_conns = Arc::clone(&self.cli_conns);
         let subdomain_conns = Arc::clone(&self.subdomain_conns);
         {
@@ -193,6 +228,11 @@ impl Server {
                 return;
             }
         }
+    }
+
+    async fn handle_cli_connection(&self, mut cli_stream: TcpStream) {
+        let cli_conns = Arc::clone(&self.cli_conns);
+        let subdomain_conns = Arc::clone(&self.subdomain_conns);
 
         let codec = portpub_shared::new_codec();
         let mut framed = Framed::new(&mut cli_stream, codec);
@@ -287,14 +327,19 @@ impl Server {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    let port: u16 = env::var("PORT")
-        .context("PORT environment variable not set")?
+    let cli_tcp_port: u16 = env::var("CLI_TCP_PORT")
+        .context("CLI_TCP_PORT environment variable not set")?
         .parse()
-        .context("PORT must be a valid integer")?;
+        .context("CLI_TCP_PORT must be a valid integer")?;
 
-    let server = Server::new(port);
+    let http_port: u16 = env::var("HTTP_PORT")
+        .context("HTTP_PORT environment variable not set")?
+        .parse()
+        .context("HTTP_PORT must be a valid integer")?;
+
+    let server = Server::new(cli_tcp_port, http_port);
     server.remove_stale_connections().await?;
-    server.listen().await?;
+    tokio::try_join!(server.clone().listen_cli(), server.listen_http())?;
 
     Ok(())
 }

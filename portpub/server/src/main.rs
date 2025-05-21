@@ -138,6 +138,7 @@ impl Server {
             loop {
                 info!("checking for stale connections");
 
+                let mut keys_to_remove = Vec::new();
                 for entry in subdomain_conns.iter() {
                     let msg = portpub_shared::ServerMessage::Heartbeat;
                     let msg_str = match serde_json::to_string(&msg) {
@@ -154,8 +155,12 @@ impl Server {
                             "failed to send heartbeat message, removing connection {}",
                             entry.key()
                         );
-                        subdomain_conns.remove(entry.key());
+                        keys_to_remove.push(entry.key().clone());
                     }
+                }
+
+                for key in keys_to_remove.iter() {
+                    subdomain_conns.remove(key);
                 }
 
                 sleep(Duration::from_secs(60 * 10)).await;

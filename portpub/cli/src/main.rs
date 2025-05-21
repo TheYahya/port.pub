@@ -1,4 +1,6 @@
 use chrono::Local;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use clap::{Parser, Subcommand};
 use color_eyre::Result;
 use copypasta::{ClipboardContext, ClipboardProvider};
@@ -6,6 +8,7 @@ use crossterm::event::{Event, EventStream, KeyCode};
 use futures::SinkExt;
 use httparse;
 use portpub_shared;
+use ratatui::DefaultTerminal;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Direction;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -14,21 +17,20 @@ use ratatui::text::Line;
 use ratatui::widgets::{
     Block, Cell, HighlightSpacing, Row, StatefulWidget, Table, TableState, Widget,
 };
-use ratatui::DefaultTerminal;
-use ratatui::{style::Modifier, text::Span, widgets::Paragraph, Frame};
+use ratatui::{Frame, style::Modifier, text::Span, widgets::Paragraph};
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
-use std::time::Duration;
-use std::{error::Error, io};
+use std::{thread, time::Duration};
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::net::TcpStream;
+use tokio::task;
 use tokio_stream::StreamExt;
 use tokio_util::codec::Framed;
 
 const SERVER: &str = "port.pub:4321";
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -45,31 +47,37 @@ async fn main() -> Result<()> {
 
     color_eyre::install()?;
     let terminal = ratatui::init();
-    let app_result = App::default().run(terminal, port).await;
+    let app_result = Arc::new(App::default()).run(terminal, port).await;
     ratatui::restore();
     app_result
 }
 
 #[derive(Debug, Default)]
 struct App {
-    should_quit: bool,
+    should_quit: AtomicBool,
     requests: Arc<RequestListWidget>,
 }
 
 impl App {
     const FRAMES_PER_SECOND: f32 = 60.0;
 
-    pub async fn run(mut self, mut terminal: DefaultTerminal, port: u16) -> Result<()> {
+    pub async fn run(self: Arc<Self>, mut terminal: DefaultTerminal, port: u16) -> Result<()> {
         self.requests.run(port);
 
         let period = Duration::from_secs_f32(1.0 / Self::FRAMES_PER_SECOND);
         let mut interval = tokio::time::interval(period);
         let mut events = EventStream::new();
 
-        while !self.should_quit {
+        let this = Arc::clone(&self);
+
+        while !self.should_quit.load(Ordering::SeqCst) {
             tokio::select! {
-                _ = interval.tick() => { terminal.draw(|frame| self.render(frame))?; },
-                Some(Ok(event)) = events.next() => self.handle_event(&event),
+                _ = interval.tick() => {
+                    terminal.draw(|frame| this.render(frame))?;
+                },
+                Some(Ok(event)) = events.next() => {
+                    this.handle_event(&event).await;
+                }
             }
         }
         Ok(())
@@ -79,11 +87,13 @@ impl App {
         let vertical = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]);
         let [title_area, body_area] = vertical.areas(frame.area());
 
-        let title_lines = vec![Line::from(Span::styled(
-            "port.pub",
-            Style::default().add_modifier(Modifier::BOLD),
-        ))
-        .centered()];
+        let title_lines = vec![
+            Line::from(Span::styled(
+                "port.pub",
+                Style::default().add_modifier(Modifier::BOLD),
+            ))
+            .centered(),
+        ];
         let title_paragraph = Paragraph::new(title_lines);
 
         frame.render_widget(title_paragraph, title_area);
@@ -91,28 +101,36 @@ impl App {
         frame.render_widget(&*self.requests, body_area);
     }
 
-    fn handle_event(&mut self, event: &Event) {
+    async fn handle_event(self: &Arc<Self>, event: &Event) {
+        let this = Arc::clone(self);
         if let Some(key) = event.as_key_press_event() {
             match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+                KeyCode::Char('q') | KeyCode::Esc => this.should_quit.store(true, Ordering::SeqCst),
                 KeyCode::Char('j') | KeyCode::Down => self.requests.scroll_down(),
                 KeyCode::Char('k') | KeyCode::Up => self.requests.scroll_up(),
                 KeyCode::Char('c') => {
-                    let sub_domain = &self.requests.state.read().unwrap().sub_domain.clone();
-                    let domain = format!("{}.port.pub", sub_domain);
-                    let mut clipboard = match ClipboardContext::new() {
-                        Ok(c) => c,
-                        Err(_) => {
-                            // TODO: show error properly
-                            return;
-                        }
-                    };
+                    task::spawn_blocking(move || {
+                        let sub_domain = this.requests.state.read().unwrap().sub_domain.clone();
+                        let domain = format!("{}.port.pub", sub_domain);
+                        let mut clipboard = match ClipboardContext::new() {
+                            Ok(c) => c,
+                            // TODO: handle error properly
+                            Err(_) => {
+                                return;
+                            }
+                        };
 
-                    match clipboard.set_contents(domain.to_owned()) {
-                        Ok(_) => {}
-                        // TODO: handle error properly
-                        Err(_) => {}
-                    }
+                        match clipboard.set_contents(domain.to_owned()) {
+                            Ok(_) => {}
+                            // TODO: handle error properly
+                            Err(_) => {
+                                return;
+                            }
+                        }
+
+                        // HACK: sleeping for to keep serving memory for x11
+                        thread::sleep(Duration::from_secs(60 * 10));
+                    });
                 }
                 _ => {}
             }

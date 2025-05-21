@@ -1,11 +1,11 @@
 use chrono::Local;
 use clap::{Parser, Subcommand};
 use color_eyre::Result;
+use copypasta::{ClipboardContext, ClipboardProvider};
 use crossterm::event::{Event, EventStream, KeyCode};
 use futures::SinkExt;
 use httparse;
 use portpub_shared;
-use ratatui::DefaultTerminal;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Direction;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -14,11 +14,13 @@ use ratatui::text::Line;
 use ratatui::widgets::{
     Block, Cell, HighlightSpacing, Row, StatefulWidget, Table, TableState, Widget,
 };
-use ratatui::{Frame, style::Modifier, text::Span, widgets::Paragraph};
+use ratatui::DefaultTerminal;
+use ratatui::{style::Modifier, text::Span, widgets::Paragraph, Frame};
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
+use std::{error::Error, io};
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_stream::StreamExt;
@@ -77,13 +79,11 @@ impl App {
         let vertical = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]);
         let [title_area, body_area] = vertical.areas(frame.area());
 
-        let title_lines = vec![
-            Line::from(Span::styled(
-                "port.pub",
-                Style::default().add_modifier(Modifier::BOLD),
-            ))
-            .centered(),
-        ];
+        let title_lines = vec![Line::from(Span::styled(
+            "port.pub",
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
+        .centered()];
         let title_paragraph = Paragraph::new(title_lines);
 
         frame.render_widget(title_paragraph, title_area);
@@ -97,6 +97,23 @@ impl App {
                 KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
                 KeyCode::Char('j') | KeyCode::Down => self.requests.scroll_down(),
                 KeyCode::Char('k') | KeyCode::Up => self.requests.scroll_up(),
+                KeyCode::Char('c') => {
+                    let sub_domain = &self.requests.state.read().unwrap().sub_domain.clone();
+                    let domain = format!("{}.port.pub", sub_domain);
+                    let mut clipboard = match ClipboardContext::new() {
+                        Ok(c) => c,
+                        Err(_) => {
+                            // TODO: show error properly
+                            return;
+                        }
+                    };
+
+                    match clipboard.set_contents(domain.to_owned()) {
+                        Ok(_) => {}
+                        // TODO: handle error properly
+                        Err(_) => {}
+                    }
+                }
                 _ => {}
             }
         }
@@ -113,6 +130,7 @@ struct RequestListState {
     requests: Vec<Request>,
     loading_state: LoadingState,
     top_status: String,
+    sub_domain: String,
     table_state: TableState,
 }
 
@@ -289,7 +307,11 @@ impl RequestListWidget {
                     });
                 }
                 portpub_shared::ServerMessage::SubDomain(sub_domain) => {
-                    self.set_top_state(format!("Published at: {sub_domain}.port.pub"));
+                    self.set_top_state(format!(
+                        // TODO: change colors!
+                        "Published at: {sub_domain}.port.pub    <c> to copy"
+                    ));
+                    self.set_subdomain(sub_domain);
                 }
             };
         }
@@ -303,6 +325,10 @@ impl RequestListWidget {
 
     fn set_top_state(&self, status: String) {
         self.state.write().unwrap().top_status = status;
+    }
+
+    fn set_subdomain(&self, subdomain: String) {
+        self.state.write().unwrap().sub_domain = subdomain;
     }
 
     fn scroll_down(&self) {

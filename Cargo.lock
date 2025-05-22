@@ -1255,7 +1255,7 @@ dependencies = [
 
 [[package]]
 name = "portpub"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1282,7 +1282,7 @@ dependencies = [
 
 [[package]]
 name = "portpub-shared"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1519,7 +1519,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "bytes",

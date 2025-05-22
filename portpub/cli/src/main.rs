@@ -1,6 +1,4 @@
 use chrono::Local;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use clap::{Parser, Subcommand};
 use color_eyre::Result;
 use copypasta::{ClipboardContext, ClipboardProvider};
@@ -13,13 +11,18 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Direction;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
-use ratatui::text::Line;
 use ratatui::widgets::{
     Block, Cell, HighlightSpacing, Row, StatefulWidget, Table, TableState, Widget,
 };
-use ratatui::{Frame, style::Modifier, text::Span, widgets::Paragraph};
+use ratatui::{
+    Frame,
+    style::Modifier,
+    text::{Line, Span},
+    widgets::Paragraph,
+};
 use std::env;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
 use std::{thread, time::Duration};
@@ -28,14 +31,6 @@ use tokio::net::TcpStream;
 use tokio::task;
 use tokio_stream::StreamExt;
 use tokio_util::codec::Framed;
-
-fn is_x11_session() -> bool {
-    if let Ok(session_type) = env::var("XDG_SESSION_TYPE") {
-        session_type.to_lowercase() == "x11"
-    } else {
-        false
-    }
-}
 
 const SERVER: &str = "port.pub:4321";
 
@@ -160,6 +155,7 @@ struct RequestListState {
     loading_state: LoadingState,
     top_status: String,
     sub_domain: String,
+    local_port: u16,
     table_state: TableState,
 }
 
@@ -188,6 +184,8 @@ impl RequestListWidget {
     }
 
     async fn run_portpub(self: Arc<Self>, port: u16) {
+        self.set_local_port(port);
+
         let remote_socket = TcpStream::connect(SERVER)
             .await
             .expect("failed to connect to port.pub");
@@ -336,10 +334,6 @@ impl RequestListWidget {
                     });
                 }
                 portpub_shared::ServerMessage::SubDomain(sub_domain) => {
-                    self.set_top_state(format!(
-                        // TODO: change colors!
-                        "Published at: {sub_domain}.port.pub    <c> to copy"
-                    ));
                     self.set_subdomain(sub_domain);
                 }
             };
@@ -358,6 +352,10 @@ impl RequestListWidget {
 
     fn set_subdomain(&self, subdomain: String) {
         self.state.write().unwrap().sub_domain = subdomain;
+    }
+
+    fn set_local_port(&self, local_port: u16) {
+        self.state.write().unwrap().local_port = local_port;
     }
 
     fn scroll_down(&self) {
@@ -407,16 +405,40 @@ impl<R: AsyncRead + Unpin> AsyncRead for PeekReader<R> {
 impl Widget for &RequestListWidget {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let mut state = self.state.write().unwrap();
-        let top_status = Span::raw(state.top_status.to_string());
+        let subdomain = state.sub_domain.to_string();
+        let local_port = state.local_port.to_string();
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .constraints([Constraint::Length(2), Constraint::Min(0)])
             .split(area);
 
-        let top_line = Paragraph::new(Line::from(top_status));
+        let rows = [
+            Row::new(vec![
+                Cell::from("Forwarding: "),
+                Cell::from(Line::from_iter([
+                    Span::styled(
+                        format!("{subdomain}.port.pub"),
+                        Style::new().fg(Color::LightGreen),
+                    ),
+                    format!(" -> localhost:{local_port}").into(),
+                ])),
+            ]),
+            Row::new(vec![
+                Cell::from("Copy to clipboard"),
+                Cell::from(Line::from_iter([Span::styled(
+                    format!("<c>"),
+                    Style::new().fg(Color::LightGreen),
+                )])),
+            ]),
+        ];
 
-        top_line.render(chunks[0], buf);
+        let widths = [Constraint::Length(20), Constraint::Fill(1)];
+        let table = Table::new(rows, widths)
+            .highlight_spacing(HighlightSpacing::Always)
+            .highlight_symbol(">>")
+            .row_highlight_style(Style::new().on_blue());
+        Widget::render(table, chunks[0], buf);
 
         let loading_state = Line::from(format!("{:?}", state.loading_state)).right_aligned();
         let block = Block::bordered()
@@ -472,4 +494,12 @@ enum Commands {
         #[clap(short, long)]
         port: u16,
     },
+}
+
+fn is_x11_session() -> bool {
+    if let Ok(session_type) = env::var("XDG_SESSION_TYPE") {
+        session_type.to_lowercase() == "x11"
+    } else {
+        false
+    }
 }

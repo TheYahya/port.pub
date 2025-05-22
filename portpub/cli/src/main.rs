@@ -18,6 +18,7 @@ use ratatui::widgets::{
     Block, Cell, HighlightSpacing, Row, StatefulWidget, Table, TableState, Widget,
 };
 use ratatui::{Frame, style::Modifier, text::Span, widgets::Paragraph};
+use std::env;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
@@ -27,6 +28,14 @@ use tokio::net::TcpStream;
 use tokio::task;
 use tokio_stream::StreamExt;
 use tokio_util::codec::Framed;
+
+fn is_x11_session() -> bool {
+    if let Ok(session_type) = env::var("XDG_SESSION_TYPE") {
+        session_type.to_lowercase() == "x11"
+    } else {
+        false
+    }
+}
 
 const SERVER: &str = "port.pub:4321";
 
@@ -128,8 +137,10 @@ impl App {
                             }
                         }
 
-                        // HACK: sleeping for to keep serving memory for x11
-                        thread::sleep(Duration::from_secs(60 * 10));
+                        if is_x11_session() {
+                            // HACK: sleeping for to keep serving memory for x11
+                            thread::sleep(Duration::from_secs(60 * 10));
+                        }
                     });
                 }
                 _ => {}

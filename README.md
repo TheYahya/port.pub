@@ -1,3 +1,7 @@
+[![Crates.io](https://img.shields.io/crates/v/portpub.svg)](https://crates.io/crates/portpub)
+[![Codecov](https://codecov.io/github/theyahya/port.pub/coverage.svg?branch=main)](https://codecov.io/gh/theyahya/port.pub)
+[![Dependency status](https://deps.rs/repo/github/theyahya/port.pub/status.svg)](https://deps.rs/repo/github/theyahya/port.pub)
+
 # port.pub
 Share your local http server with public internet.
 
